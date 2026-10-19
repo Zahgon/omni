@@ -4,9 +4,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/omni-network/omni/lib/contracts/solvernet"
 	"github.com/omni-network/omni/lib/ethclient"
+	"github.com/omni-network/omni/lib/tutil"
 	"github.com/omni-network/omni/solver/job"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	dbm "github.com/cosmos/cosmos-db"
@@ -22,6 +25,10 @@ func TestDB(t *testing.T) {
 	fuzzLog := func() types.Log {
 		var resp types.Log
 		fuzzer.Fuzz(&resp)
+		resp.Topics = []common.Hash{
+			solvernet.TopicClosed,
+			tutil.RandomHash(), // OrderID
+		}
 
 		return resp
 	}
@@ -32,7 +39,7 @@ func TestDB(t *testing.T) {
 	for i, elog := range elogs {
 		t0 := time.Now()
 		id := uint64(i + 1)
-		j, err := db.Insert(ctx, id, elog)
+		j, err := db.InsertLog(ctx, id, elog)
 		require.NoError(t, err)
 		require.Equal(t, id, j.GetId())
 		require.Equal(t, id, j.GetChainId())
@@ -46,26 +53,13 @@ func TestDB(t *testing.T) {
 		require.False(t, ok)
 
 		// Idempotent
-		j, err = db.Insert(ctx, id, elog)
+		j, err = db.InsertLog(ctx, id, elog)
 		require.NoError(t, err)
 		require.Equal(t, id, j.GetId())
-
-		el, err := j.EventLog()
-		require.NoError(t, err)
-		require.Equal(t, elog, el)
 
 		all, err := db.All(ctx)
 		require.NoError(t, err)
 		require.Len(t, all, i+1)
-		last, err := all[len(all)-1].EventLog()
-		require.NoError(t, err)
-		require.Equal(t, elog, last)
-
-		// Inserting duplicate with different hash fails
-		elog2 := elog
-		elog2.BlockHash[0] = ^elog2.BlockHash[0]
-		_, err = db.Insert(ctx, id, elog2)
-		require.ErrorContains(t, err, "duplicate")
 	}
 
 	for i := range len(elogs) {

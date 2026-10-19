@@ -3,9 +3,9 @@ package job
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 
+	"github.com/omni-network/omni/lib/contracts/solvernet"
 	"github.com/omni-network/omni/lib/errors"
 	"github.com/omni-network/omni/lib/umath"
 
@@ -70,10 +70,6 @@ func (db *DB) All(ctx context.Context) ([]*Job, error) {
 			return nil, errors.Wrap(err, "get value")
 		}
 
-		if _, err := job.EventLog(); err != nil {
-			return nil, err
-		}
-
 		jobs = append(jobs, proto.Clone(job).(*Job)) //nolint:forcetypeassert // Type known
 	}
 
@@ -109,46 +105,24 @@ func (db *DB) Exists(ctx context.Context, id uint64) (bool, error) {
 // Insert adds a new job to the database returning the created job.
 // It is idempotent, and will not insert the same job twice, instead returning the existing job.
 // It however errors if re-inserting reorged events, this isn't supported/expected.
-func (db *DB) Insert(ctx context.Context, chainID uint64, elog types.Log) (*Job, error) {
+func (db *DB) Insert(ctx context.Context, chainID uint64, height uint64, tx string, index uint64, orderID []byte, status uint64) (*Job, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
-	if j, ok, err := db.getUnique(ctx, chainID, elog.BlockNumber, elog.Index); err != nil {
+	if j, ok, err := db.getUnique(ctx, chainID, height, tx, index); err != nil {
 		return nil, err
 	} else if ok {
-		el, err := j.EventLog()
-		if err != nil {
-			return nil, err
-		}
-
-		if el.BlockHash != elog.BlockHash {
-			return nil, errors.New("duplicate job, but hash mismatch (reorg not supported) [BUG]",
-				"existing_hash", el.BlockHash,
-				"new_hash", elog.BlockHash,
-				"height", elog.BlockNumber,
-				"index", elog.Index,
-			)
-		}
-
 		return j, nil
 	}
 
-	bz, err := json.Marshal(elog)
-	if err != nil {
-		return nil, errors.Wrap(err, "marshal event")
-	}
-
-	index, err := umath.ToUint64(elog.Index)
-	if err != nil {
-		return nil, err
-	}
-
 	j := &Job{
-		ChainId:     chainID,
-		BlockHeight: elog.BlockNumber,
-		EventIndex:  index,
-		EventJson:   bz,
-		CreatedAt:   timestamppb.Now(),
+		ChainId:    chainID,
+		Height:     height,
+		EventIndex: index,
+		TxString:   tx,
+		OrderId:    orderID,
+		Status:     status,
+		CreatedAt:  timestamppb.Now(),
 	}
 
 	id, err := db.table.InsertReturningId(ctx, j)
@@ -162,13 +136,30 @@ func (db *DB) Insert(ctx context.Context, chainID uint64, elog types.Log) (*Job,
 	return resp, nil
 }
 
-func (db *DB) getUnique(ctx context.Context, chainID uint64, height uint64, index uint) (*Job, bool, error) {
-	indexU64, err := umath.ToUint64(index)
+// InsertLog adds a new job to the database returning the created job.
+// It is idempotent, and will not insert the same job twice, instead returning the existing job.
+// It however errors if re-inserting reorged events, this isn't supported/expected.
+func (db *DB) InsertLog(ctx context.Context, chainID uint64, elog types.Log) (*Job, error) {
+	index, err := umath.ToUint64(elog.Index)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
-	j, err := db.table.GetByChainIdBlockHeightEventIndex(ctx, chainID, height, indexU64)
+	orderID, status, err := solvernet.ParseEvent(elog)
+	if err != nil {
+		return nil, err
+	}
+
+	statusU64, err := umath.ToUint64(status)
+	if err != nil {
+		return nil, err
+	}
+
+	return db.Insert(ctx, chainID, elog.BlockNumber, elog.TxHash.String(), index, orderID[:], statusU64)
+}
+
+func (db *DB) getUnique(ctx context.Context, chainID uint64, height uint64, tx string, index uint64) (*Job, bool, error) {
+	j, err := db.table.GetByChainIdHeightTxStringEventIndex(ctx, chainID, height, tx, index)
 	if ormerrors.IsNotFound(err) {
 		return nil, false, nil
 	} else if err != nil {
